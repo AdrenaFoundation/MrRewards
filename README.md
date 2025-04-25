@@ -11,4 +11,8 @@ OpenSource rust client (Keeper) handling reward distribution from the Adrena dat
 
 `$> cargo run -- --payer-keypair payer.json --endpoint https://adrena.rpcpool.com/xxx --commitment finalized`
 
+
+Or on Render
+
+`./target/release/mrrewards --payer-keypair /etc/secrets/mrrewards.json --endpoint https://adrena.rpcpool.com/xxx--x-token xxx --commitment processed --db-string "postgresql://adrena:YYY.singapore-postgres.render.com/transaction_db_celf" --combined-cert /etc/secrets/combined.pem`
 Ideally run that on a Render instance.
