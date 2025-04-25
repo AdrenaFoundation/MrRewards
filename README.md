@@ -1,8 +1,6 @@
 # MrRewards
 
-OpenSource GRPC rust client (Keeper) handling Liquidation, SL and TP for the adrena program.
-
-See MrSablierStaking for the staking related counterpart.
+OpenSource rust client (Keeper) handling reward distribution from the Adrena database.
 
 ## Build
 
