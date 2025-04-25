@@ -1,0 +1,31 @@
+# Ignore specific files
+.anchor
+.DS_Store
+**/*.bak
+test-ledger
+
+# Ignore node_modules and yarn.lock files
+**/node_modules
+**/yarn.lock
+
+# Ignore specific directories and files related to Next.js
+**/.next
+
+# Ignore adrena-keypairs directory and its contents
+adrena-keypairs
+adrena-keypairs/**
+
+# Ignore pnp files and yarn directory
+.pnp.*
+.yarn/
+
+# Ignore all files in the target directory except for certain subdirectories and files
+target/*
+!target/deploy/
+!target/deploy/*.so
+!target/idl/
+!target/idl/adrena.json
+!target/types/
+!target/types/adrena.ts
+
+payer*.json
