@@ -20,6 +20,7 @@ const BONK_MINT: &str = "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263";
 const ADX_DECIMALS: u8 = 6;
 const JTO_DECIMALS: u8 = 9;
 const BONK_DECIMALS: u8 = 5;
+const COMPUTE_UNIT_LIMIT: u32 = 120_000;
 
 #[derive(Debug, Clone, Copy, Default, clap::ValueEnum)]
 enum ArgsCommitment {
@@ -247,7 +248,7 @@ async fn distribute_reward(
 
     // Add compute budget instructions
     instructions.push(ComputeBudgetInstruction::set_compute_unit_price(*median_priority_fee.lock().await));
-    instructions.push(ComputeBudgetInstruction::set_compute_unit_limit(50_000));
+    instructions.push(ComputeBudgetInstruction::set_compute_unit_limit(COMPUTE_UNIT_LIMIT));
 
     // Add token transfer instructions
     if adx_native_amount > 0 {
