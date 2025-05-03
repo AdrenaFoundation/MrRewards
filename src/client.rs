@@ -12,7 +12,7 @@ pub mod priority_fees;
 pub mod utils;
 
 const DEFAULT_ENDPOINT: &str = "http://127.0.0.1:10000";
-const MEAN_PRIORITY_FEE_PERCENTILE: u64 = 5000; // 50th
+const MEAN_PRIORITY_FEE_PERCENTILE: u64 = 2500; // 25th
 const PRIORITY_FEE_REFRESH_INTERVAL: Duration = Duration::from_secs(5); // seconds
 const ADX_MINT: &str = "AuQaustGiaqxRvj2gtCdrd22PBzTn8kM3kEPEkZCtuDw";
 const JTO_MINT: &str = "jtojtomepa8beP8AuQc6eXt5FriJwfFMwQx2v2f9mCL";
