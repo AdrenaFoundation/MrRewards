@@ -1,10 +1,12 @@
 use { 
-    anchor_client::{solana_sdk::signer::keypair::read_keypair_file, Client, Cluster}, anchor_spl::token::spl_token, backoff::{future::retry, ExponentialBackoff}, clap::Parser, futures::TryFutureExt, priority_fees::fetch_mean_priority_fee, solana_sdk::{compute_budget::ComputeBudgetInstruction, pubkey::Pubkey, signer::Signer, transaction::Transaction}, spl_associated_token_account::{get_associated_token_address, instruction::create_associated_token_account_idempotent}, std::{collections::HashMap, env, fs::File, str::FromStr, sync::Arc, time::Duration}, tokio::{
+    anchor_client::{solana_sdk::signer::keypair::read_keypair_file, Client, Cluster}, anchor_spl::token::spl_token, backoff::{future::retry, ExponentialBackoff}, clap::Parser, futures::TryFutureExt, openssl::ssl::{SslConnector, SslMethod}, postgres_openssl::MakeTlsConnector, priority_fees::fetch_mean_priority_fee, solana_sdk::{compute_budget::ComputeBudgetInstruction, pubkey::Pubkey, signer::Signer, transaction::Transaction}, spl_associated_token_account::{get_associated_token_address, instruction::create_associated_token_account_idempotent}, std::{env, str::FromStr, sync::Arc, time::Duration}, tokio::{
         sync::Mutex,
         task::JoinHandle,
         time::interval,
     }, yellowstone_grpc_proto::prelude::CommitmentLevel
-};use std::process::exit;
+};
+use solana_sdk::signature::Keypair;
+use anchor_client::Program;
 
 pub mod priority_fees;
 pub mod utils;
@@ -12,7 +14,6 @@ pub mod utils;
 const DEFAULT_ENDPOINT: &str = "http://127.0.0.1:10000";
 const MEAN_PRIORITY_FEE_PERCENTILE: u64 = 5000; // 50th
 const PRIORITY_FEE_REFRESH_INTERVAL: Duration = Duration::from_secs(5); // seconds
-
 const ADX_MINT: &str = "AuQaustGiaqxRvj2gtCdrd22PBzTn8kM3kEPEkZCtuDw";
 const JTO_MINT: &str = "jtojtomepa8beP8AuQc6eXt5FriJwfFMwQx2v2f9mCL";
 const BONK_MINT: &str = "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263";
@@ -65,23 +66,6 @@ struct Args {
     combined_cert: String,
 }
 
-impl Args {
-    fn get_commitment(&self) -> Option<CommitmentLevel> {
-        Some(self.commitment.unwrap_or_default().into())
-    }
-
-    async fn connect(&self) -> anyhow::Result<GeyserGrpcClient<impl Interceptor>> {
-        GeyserGrpcClient::build_from_shared(self.endpoint.clone())?
-            .x_token(self.x_token.clone())?
-            .connect_timeout(CONNECT_TIMEOUT)
-            .timeout(REQUEST_TIMEOUT)
-            .tls_config(ClientTlsConfig::new().with_native_roots())?
-            .connect()
-            .await
-            .map_err(Into::into)
-    }
-}
-
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     env::set_var(
@@ -129,7 +113,7 @@ async fn main() -> anyhow::Result<()> {
                 Cluster::Custom(args.endpoint.clone(), args.endpoint.clone()),
                 Arc::clone(&payer),
             );
-            let program = client
+            let adrena_program = client
                 .program(adrena_abi::ID)
                 .map_err(|e| backoff::Error::transient(e.into()))?;
             log::info!("  <> gRPC, RPC clients connected!");
@@ -211,12 +195,10 @@ async fn main() -> anyhow::Result<()> {
             // ////////////////////////////////////////////////////////////////
             loop {
                 let reward_entry = get_unprocessed_reward_entry_from_db(&db).await?;
-
-
-
                 if let Some(reward_entry) = reward_entry {
                     distribute_reward(
-                        &client,
+                        &adrena_program,
+                        &db,
                         &payer,
                         &reward_entry,
                         &median_priority_fee,
@@ -237,21 +219,21 @@ async fn main() -> anyhow::Result<()> {
 }
 
 async fn distribute_reward(
-    client: &Client<Arc<Keypair>>,
+    adrena_program: &Program<Arc<Keypair>>,
+    db: &tokio_postgres::Client,
     payer: &Arc<Keypair>,
     reward_entry: &RewardEntry,
     median_priority_fee: &Arc<Mutex<u64>>,
 ) -> Result<(), backoff::Error<anyhow::Error>> {
-    let adx_native_amount = (reward_entry.adx_amount * 1_000_000) as u64; // Convert to ADX (6 decimals)
-    let jto_native_amount = (reward_entry.jto_amount * 1_000_000_000) as u64; // Convert to JTO (9 decimals)
-    let bonk_native_amount = (reward_entry.bonk_amount * 100_000) as u64; // Convert to BONK (5 decimals)
+    let adx_native_amount = (reward_entry.adx_amount * 10_u64.pow(ADX_DECIMALS as u32)) as u64; // Convert to ADX (6 decimals)
+    let jto_native_amount = (reward_entry.jto_amount * 10_u64.pow(JTO_DECIMALS as u32)) as u64; // Convert to JTO (9 decimals)
+    let bonk_native_amount = (reward_entry.bonk_amount * 10_u64.pow(BONK_DECIMALS as u32)) as u64; // Convert to BONK (5 decimals)
 
     let adx_mint = Pubkey::from_str(ADX_MINT).unwrap();
     let jto_mint = Pubkey::from_str(JTO_MINT).unwrap();
     let bonk_mint = Pubkey::from_str(BONK_MINT).unwrap();
 
-    let recipient = Pubkey::from_str(&reward_entry.recipient_pubkey)
-        .expect("Failed to parse wallet address");
+    let recipient = &reward_entry.recipient_pubkey;
                 
     log::info!(" [reward ID {}] Start reward send processing to recipient {} (ADX {} | JTO {} | BONK {})", reward_entry.reward_id, recipient, adx_native_amount, jto_native_amount, bonk_native_amount);
 
@@ -259,83 +241,102 @@ async fn distribute_reward(
     db.execute(
         "UPDATE rewards SET has_processing_started = true WHERE reward_id = $1",
         &[&reward_entry.reward_id],
-    ).await?;
+    ).await.map_err(|e| backoff::Error::transient(e.into()))?;
 
+    let mut instructions = vec![];
+
+    // Add compute budget instructions
+    instructions.push(ComputeBudgetInstruction::set_compute_unit_price(*median_priority_fee.lock().await));
+    instructions.push(ComputeBudgetInstruction::set_compute_unit_limit(50_000));
+
+    // Add token transfer instructions
     if adx_native_amount > 0 {
-        distribute_token(client, payer, recipient, adx_native_amount, adx_mint, ADX_DECIMALS).await?;
+        let source_ata = get_associated_token_address(&payer.pubkey(), &adx_mint);
+        let destination_ata = get_associated_token_address(&recipient, &adx_mint);
+        
+        instructions.push(create_associated_token_account_idempotent(
+            &payer.pubkey(),
+            &recipient,
+            &adx_mint,
+            &spl_token::ID,
+        ));
+        
+        instructions.push(spl_token::instruction::transfer(
+            &spl_token::ID,
+            &source_ata,
+            &destination_ata,
+            &payer.pubkey(),
+            &[],
+            adx_native_amount,
+        ).unwrap());
     }
+
     if jto_native_amount > 0 {
-        distribute_token(client, payer, recipient, jto_native_amount, jto_mint, JTO_DECIMALS).await?;
+        let source_ata = get_associated_token_address(&payer.pubkey(), &jto_mint);
+        let destination_ata = get_associated_token_address(&recipient, &jto_mint);
+        
+        instructions.push(create_associated_token_account_idempotent(
+            &payer.pubkey(),
+            &recipient,
+            &jto_mint,
+            &spl_token::ID,
+        ));
+        
+        instructions.push(spl_token::instruction::transfer(
+            &spl_token::ID,
+            &source_ata,
+            &destination_ata,
+            &payer.pubkey(),
+            &[],
+            jto_native_amount,
+        ).unwrap());
     }
+
     if bonk_native_amount > 0 {
-        distribute_token(client, payer, recipient, bonk_native_amount, bonk_mint, BONK_DECIMALS).await?;
+        let source_ata = get_associated_token_address(&payer.pubkey(), &bonk_mint);
+        let destination_ata = get_associated_token_address(&recipient, &bonk_mint);
+        
+        instructions.push(create_associated_token_account_idempotent(
+            &payer.pubkey(),
+            &recipient,
+            &bonk_mint,
+            &spl_token::ID,
+        ));
+        
+        instructions.push(spl_token::instruction::transfer(
+            &spl_token::ID,
+            &source_ata,
+            &destination_ata,
+            &payer.pubkey(),
+            &[],
+            bonk_native_amount,
+        ).unwrap());
     }
+
+    let recent_blockhash = adrena_program.rpc().get_latest_blockhash().await.unwrap();
+    let tx = Transaction::new_signed_with_payer(
+        &instructions,
+        Some(&payer.pubkey()),
+        &[&payer],
+        recent_blockhash,
+    );
+
+    let sig = adrena_program.rpc().send_and_confirm_transaction(&tx).await.unwrap();
+    log::info!("  [DONE] Rewards sent successfully to recipient {}: {}", recipient, sig);
     
     // update DB to set is_processed to true
     db.execute(
         "UPDATE rewards SET is_processed = true WHERE reward_id = $1",
         &[&reward_entry.reward_id],
-    ).await?;
+    ).await.map_err(|e| backoff::Error::transient(e.into()))?;
 
     // update DB to set has_processing_started to false
     db.execute(
         "UPDATE rewards SET has_processing_started = false WHERE reward_id = $1",
         &[&reward_entry.reward_id],
-    ).await?;
-
-    log::info!("  [DONE] Reward sent successfully to recipient {}", recipient);
+    ).await.map_err(|e| backoff::Error::transient(e.into()))?;
 
     Ok(())
-}
-
-async fn distribute_token(
-    client: &Client<Arc<Keypair>>,
-    payer: &Arc<Keypair>,
-    recipient: Pubkey,
-    amount: u64,
-    mint: Pubkey,
-    decimals: u8,
-) -> Result<(), backoff::Error<anyhow::Error>> {
-    let token_program = client.program(spl_token::ID).unwrap();
-    let source_ata = get_associated_token_address(&payer.pubkey(), &adx_mint);
-    let destination_ata = get_associated_token_address(&destination, &adx_mint);
-
-    let ix = spl_token::instruction::transfer(
-        &spl_token::ID,
-        &source_ata,
-        &destination_ata,
-        &payer.pubkey(),
-        &[],
-        amount,
-        ).unwrap();
-
-        let set_cu_price = ComputeBudgetInstruction::set_compute_unit_price(
-            *median_priority_fee.lock().await,
-        );
-        let set_cu_ix = ComputeBudgetInstruction::set_compute_unit_limit(
-            50_000,
-        );
-
-        // In case the user does not have an associated token account for the mint, create one
-        let create_ata_ix = create_associated_token_account_idempotent(
-            &program.payer(),
-            &destination,
-            &mint,
-            &spl_token::ID,
-        );
-
-        let recent_blockhash = program.rpc().get_latest_blockhash().await.unwrap();
-        let tx = Transaction::new_signed_with_payer(
-            &[set_cu_price, set_cu_ix, create_ata_ix, ix],
-            Some(&payer.pubkey()),
-            &[&payer],
-            recent_blockhash,
-        );
-
-        let sig = program.rpc().send_and_confirm_transaction(&tx).await.unwrap();
-
-        log::info!("    [sent {} {} to {}]: {}", amount, mint, destination, sig);
-
 }
 
 // Table "public.rewards"
@@ -355,7 +356,7 @@ async fn distribute_token(
 // └────────────────────────┴──────────────────────────┴───────────┴──────────┴────────────────────────────────────────────┘
 
 pub struct RewardEntry {
-    pub reward_id: u64,
+    pub reward_id: i64,
     pub recipient_pubkey: Pubkey,
     pub adx_amount: u64,
     pub bonk_amount: u64,
@@ -378,11 +379,11 @@ async fn get_unprocessed_reward_entry_from_db(
     if let Some(row) = rows.first() {
         Ok(Some(
             RewardEntry {
-                reward_id: row.get::<_, u64>(0),
+                reward_id: row.get::<_, i64>(0),
                 recipient_pubkey: Pubkey::from_str(row.get::<_, String>(1).as_str()).expect("Invalid pubkey"),
-                adx_amount: row.get::<_, u64>(2),
-                bonk_amount: row.get::<_, u64>(3),
-                jto_amount: row.get::<_, u64>(4),
+                adx_amount: row.get::<_, f64>(2) as u64,
+                bonk_amount: row.get::<_, f64>(3) as u64,
+                jto_amount: row.get::<_, f64>(4) as u64,
                 is_processed: row.get::<_, bool>(5),
                 has_processing_started: row.get::<_, bool>(6),
             }

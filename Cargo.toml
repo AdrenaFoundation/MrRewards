@@ -49,6 +49,10 @@ tokio-postgres = "0.7.12"
 openssl = "0.10.50"
 postgres-openssl = "0.5.0"
 
+# Not actually using the GPRC client, just for imports and types
+yellowstone-grpc-client = "4.0.0"
+yellowstone-grpc-proto = { version = "4.0.0", default-features = true }
+
 [profile.release]
 lto = true
 codegen-units = 1

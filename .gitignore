@@ -29,3 +29,5 @@ target/*
 !target/types/adrena.ts
 
 payer*.json
+
+combined.pem
