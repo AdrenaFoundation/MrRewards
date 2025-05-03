@@ -225,9 +225,9 @@ async fn distribute_reward(
     reward_entry: &RewardEntry,
     median_priority_fee: &Arc<Mutex<u64>>,
 ) -> Result<(), backoff::Error<anyhow::Error>> {
-    let adx_native_amount = (reward_entry.adx_amount * 10_u64.pow(ADX_DECIMALS as u32)) as u64; // Convert to ADX (6 decimals)
-    let jto_native_amount = (reward_entry.jto_amount * 10_u64.pow(JTO_DECIMALS as u32)) as u64; // Convert to JTO (9 decimals)
-    let bonk_native_amount = (reward_entry.bonk_amount * 10_u64.pow(BONK_DECIMALS as u32)) as u64; // Convert to BONK (5 decimals)
+    let adx_native_amount = (reward_entry.adx_amount * 10_f64.powf(ADX_DECIMALS as f64)) as u64; // Convert to ADX (6 decimals)
+    let jto_native_amount = (reward_entry.jto_amount * 10_f64.powf(JTO_DECIMALS as f64)) as u64; // Convert to JTO (9 decimals)
+    let bonk_native_amount = (reward_entry.bonk_amount * 10_f64.powf(BONK_DECIMALS as f64)) as u64; // Convert to BONK (5 decimals)
 
     let adx_mint = Pubkey::from_str(ADX_MINT).unwrap();
     let jto_mint = Pubkey::from_str(JTO_MINT).unwrap();
@@ -240,7 +240,7 @@ async fn distribute_reward(
     // update DB to set has_processing_started to true
     db.execute(
         "UPDATE rewards SET has_processing_started = true WHERE reward_id = $1",
-        &[&reward_entry.reward_id],
+        &[&(reward_entry.reward_id as i32)],
     ).await.map_err(|e| backoff::Error::transient(e.into()))?;
 
     let mut instructions = vec![];
@@ -327,13 +327,7 @@ async fn distribute_reward(
     // update DB to set is_processed to true
     db.execute(
         "UPDATE rewards SET is_processed = true WHERE reward_id = $1",
-        &[&reward_entry.reward_id],
-    ).await.map_err(|e| backoff::Error::transient(e.into()))?;
-
-    // update DB to set has_processing_started to false
-    db.execute(
-        "UPDATE rewards SET has_processing_started = false WHERE reward_id = $1",
-        &[&reward_entry.reward_id],
+        &[&(reward_entry.reward_id as i32)],
     ).await.map_err(|e| backoff::Error::transient(e.into()))?;
 
     Ok(())
@@ -356,11 +350,11 @@ async fn distribute_reward(
 // └────────────────────────┴──────────────────────────┴───────────┴──────────┴────────────────────────────────────────────┘
 
 pub struct RewardEntry {
-    pub reward_id: i64,
+    pub reward_id: u32,
     pub recipient_pubkey: Pubkey,
-    pub adx_amount: u64,
-    pub bonk_amount: u64,
-    pub jto_amount: u64,
+    pub adx_amount: f64,
+    pub bonk_amount: f64,
+    pub jto_amount: f64,
     pub is_processed: bool,
     pub has_processing_started: bool,
 }
@@ -370,7 +364,7 @@ async fn get_unprocessed_reward_entry_from_db(
 ) -> Result<Option<RewardEntry>, backoff::Error<anyhow::Error>> {
     let rows = db
         .query(
-            "SELECT user_pubkey, adx, bonk, jto, is_processed, has_processing_started FROM rewards WHERE is_processed = false AND has_processing_started = false",
+            "SELECT reward_id, user_pubkey, adx::float8, bonk::float8, jto::float8, is_processed, has_processing_started FROM rewards WHERE is_processed = false AND has_processing_started = false",
             &[],
         )
         .await
@@ -379,11 +373,11 @@ async fn get_unprocessed_reward_entry_from_db(
     if let Some(row) = rows.first() {
         Ok(Some(
             RewardEntry {
-                reward_id: row.get::<_, i64>(0),
+                reward_id: row.get::<_, i32>(0) as u32,
                 recipient_pubkey: Pubkey::from_str(row.get::<_, String>(1).as_str()).expect("Invalid pubkey"),
-                adx_amount: row.get::<_, f64>(2) as u64,
-                bonk_amount: row.get::<_, f64>(3) as u64,
-                jto_amount: row.get::<_, f64>(4) as u64,
+                adx_amount: row.get::<_, f64>(2),
+                bonk_amount: row.get::<_, f64>(3),
+                jto_amount: row.get::<_, f64>(4),
                 is_processed: row.get::<_, bool>(5),
                 has_processing_started: row.get::<_, bool>(6),
             }
